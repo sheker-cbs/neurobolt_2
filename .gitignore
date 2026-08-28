@@ -1,0 +1,42 @@
+# Scripts
+main_0.py
+main_1.py 
+run_neuro_1.sh 
+run_neuro_0.sh 
+submit_sub_0.sh
+
+# Subject batches
+subject_batches/
+
+# Logs
+logs_baseline/
+logs_attn/
+data/logs_attn/error_logs/
+data/logs_attn/output_logs/
+data/logs_baseline/error_logs/
+data/logs_baseline/output_logs
+checkpoints/
+
+#Miscellaneous
+assets/
+
+# Ignore data contents but keep placeholder
+data/**
+!data/.gitkeep
+
+# If a top-level dataset folder is used, treat similarly
+dataset/**
+!dataset/.gitkeep
+
+# Python cache/bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Ignore checkpoints contents but keep placeholder
+checkpoints/**
+!checkpoints/.gitkeep
+
+# Ignore all Jupyter notebooks
+*.ipynb
