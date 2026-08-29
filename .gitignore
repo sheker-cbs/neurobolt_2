@@ -31,12 +31,13 @@ dataset/**
 # Python cache/bytecode
 __pycache__/
 **/__pycache__/
-*.py[cod]
-*.pyo
+
 
 # Ignore checkpoints contents but keep placeholder
 checkpoints/**
 !checkpoints/.gitkeep
 
 # Ignore all Jupyter notebooks
-*.ipynb
+# *.ipynb
+
+TEST_GIT_CHANGE
