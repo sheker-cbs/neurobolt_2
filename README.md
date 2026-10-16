@@ -55,31 +55,25 @@
 ```text
 neuro_bolt-main/
 ├── main.py                         # Namespace config + subject select + run folders
-├── run_neuro.sh                    # SLURM script (batch file as $1)
-├── prepare_subject_batches.sh      # write subject_batches/batch_NNN.txt
-├── submit_all_subjects.sh          # dated run + sbatch per batch;
+├── run_neuro.sh                    # SLURM script (NEUROBOLT_SUBJECT / training mode)
+├── submit_sub.sh                   # one sbatch per subject via NEUROBOLT_SUBJECT
 ├── engine.py
 ├── runtime.py                      # live (imported by main)
 ├── utils.py
 ├── optim_factory.py
 ├── requirements.txt
-├── plot_attention_attribution.py   # Fig.5-style topo/freq (attention ckpts)
-├── scan_split_example.xlsx         # VU split sheet from original NeuroBOLT (optional)
 ├── arch/                           # baseline MSS
 │   ├── model.py
 │   └── model_multiscale.py
 ├── models/                         # attention MSS
 │   ├── model.py
 │   ├── model_multiscale.py
-│   ├── new_layers.py
-│   └── check.py
+│   └── new_layers.py
 ├── dataset_maker/
-│   ├── get_datasets.py
-│   └── preproc.py
-├── checkpoints/                    # labram-base.pth; log_baseline/ & log_attn/ dated runs
-├── logs_baseline/                  # SLURM .out/.err (not old flat logs/)
-├── logs_attn/                      # SLURM .out/.err (attention)
-├── subject_batches/                # generated batch lists 
+│   └── get_datasets.py
+├── checkpoints/                    # labram-base.pth; log_baseline/ & log_attn/ run folders
+├── logs_baseline/                  # SLURM .out/.err for the default baseline mode
+├── logs_attn/                      # SLURM .out/.err when #SBATCH paths are switched
 ├── README.md                       # this file
 
 
@@ -87,7 +81,7 @@ neuro_bolt-main/
 ---
 ## About this project
 
-This project contains custom implementation of NeuroBOLT pipeline, which reconstructs fMRI BOLD signals from EEG data. This fork adapts the original pipeline to the `Algermissen` dataset, allowing for both per-subject and cross-subject training, adds attention pooling layers in `new_layers.py` to output which frequency band and channel contributes the most to the training, and outputs topographical and frequency plots. 
+This project contains a custom implementation of the NeuroBOLT pipeline, which reconstructs fMRI BOLD signals from EEG data. This fork trains one model per Algermissen subject (intrascan). Attention mode adds pooling layers in `new_layers.py` that record which frequency band and channel contribute most during training. 
  
 ---
 
@@ -134,69 +128,20 @@ Output: artifacts (files the training run produces) saved under `checkpoints/log
 
 ## SLURM job submission
 
-`prepare_subject_batches.sh`, `submit_sub.sh` and `run_neuro.sh` handle discovering subjects, splitting them into batches, and submitting cluster jobs. 
+`main.py` selects subjects from `NEUROBOLT_SUBJECT` or `SLURM_ARRAY_TASK_ID`. If neither is set, the job trains every Algermissen subject. It does not read batch files, `NEUROBOLT_SUBJECTS`, `NEUROBOLT_CAMPAIGN_DIR`, or `NEUROBOLT_SKIP_COMPLETED`. Checkpoints are written under `checkpoints/log_baseline/runs/` or `checkpoints/log_attn/runs/`, depending on `NEUROBOLT_TRAINING_MODE`.
+
+`#SBATCH --output/--error` in `run_neuro.sh` point at `logs_baseline/` to match the default mode. For attention, change those two lines to `logs_attn/` before `sbatch` (Slurm fixes them at submit time).
 
 ```sh
-prepare_subject_batches.sh  →  writes subject_batches/batch_NNN.txt
-            ↓
-submit_all_subjects.sh      →  sbatch's one job per batch file
-            ↓
-run_neuro.sh (the SLURM job) →  runs `python main.py` for its assigned subjects
+# One subject, baseline (default)
+NEUROBOLT_SUBJECT=sub-001 sbatch --export=ALL run_neuro.sh
 
-```
+# One subject, attention
+NEUROBOLT_TRAINING_MODE=attention NEUROBOLT_SUBJECT=sub-001 sbatch --export=ALL run_neuro.sh
 
-### 1. `prepare_subject_batches.sh`
-Purpose: scans the Algermissen data directory for subject IDs (from `{subject}_block*.npz` filenames), excludes the same skip set as `main.py` (`sub-004, sub-015, sub-025`), and splits the remaining subjects into batch files of a fixed size under `subject_batches/batch_NNN.txt` (one subject ID per line). It also records the batch size used in `.batch_size so submit_all_subjects.sh` can detect if you've changed it.
-
-Usage: 
-```sh
-bash prepare_subject_batches.sh                       # default: 5 subjects/batch
-bash prepare_subject_batches.sh --batch-size 5
-SUBJECTS_PER_JOB=5 bash prepare_subject_batches.sh     # same, via env var
-bash prepare_subject_batches.sh --batch-size 1         # one subject per file
-bash prepare_subject_batches.sh sub-001 sub-007 sub-012  # explicit subject list, skip scan
-
-
-ALGERMISSEN_DATA_ROOT=/path/to/data bash prepare_subject_batches.sh #overrides the input directory 
-BATCH_DIR=./my_batches bash prepare_subject_batches.sh # overrides the output directory of the batches
-```
-
-
-### 2.`submit_sub.sh`
-
-Purpose: submits SLURM jobs in batches created by `prepare_subject_batches.sh` by invoking `run_neuro.sh`. Supports rerunning and resuming the interrupted batch jobs. Contains `--dry_run` command to preview without submitting jobs.
-
-Output: creates a folder that contains `checkpoints/log_baseline/YYYYMMDD-HHMMSS/` or `log_attn/...` with a `campaign_meta`.json, batch size, and subject list.
-
-Usage: 
-
-```sh
-# Standard: batch all subjects, 5 per job, submit to SLURM
-bash submit_all_subjects.sh
-
-# Custom batch size
-bash submit_all_subjects.sh --batch-size 5
-SUBJECTS_PER_JOB=5 bash submit_all_subjects.sh
-
-# One subject per job (max parallelism)
-bash submit_all_subjects.sh --one-per-job
-
-# Preview without submitting
-bash submit_all_subjects.sh --dry-run
-
-# Reuse previously-generated batch files instead of rescanning data
-bash submit_all_subjects.sh --reuse-batches
-
-# Only specific subjects
-bash submit_all_subjects.sh sub-001 sub-007 sub-012
-bash submit_all_subjects.sh --batch-size 3 sub-001 sub-002 sub-003 sub-005
-
-# Attention-mode training (instead of default baseline)
-NEUROBOLT_TRAINING_MODE=attention bash submit_all_subjects.sh
-
-# Resume an incomplete campaign — only resubmits subjects missing a checkpoint
-bash submit_all_subjects.sh --resume-incomplete
-bash submit_all_subjects.sh --resume-incomplete --campaign /path/to/checkpoints/log_baseline/20260820-113000
+# Same, via the helper (one job per subject id)
+bash submit_sub.sh sub-001
+NEUROBOLT_TRAINING_MODE=attention bash submit_sub.sh sub-001
 ```
 
 ### Training mechanics
