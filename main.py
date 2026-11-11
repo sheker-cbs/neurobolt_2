@@ -18,7 +18,8 @@ This script trains one NeuroBOLT model per subject on the Algermissen EEG/fMRI
 dataset (intra-subject / "intrascan"). Configuration is set on an
 `argparse.Namespace` in-place (no CLI parsing). Subject selection for SLURM
 arrays uses env vars `NEUROBOLT_SUBJECT` or `SLURM_ARRAY_TASK_ID` (see
-`select_subjects`). Each job writes a unique folder under `checkpoints/runs/`.
+`select_subjects`). Each job writes a unique folder under
+`checkpoints/log_baseline/runs/` or `checkpoints/log_attn/runs/`.
 """
 
 import argparse
@@ -37,8 +38,9 @@ import torch.backends.cudnn as cudnn
 from timm.models import create_model
 
 # Resolve sibling modules (engine, runtime, arch, …) regardless of cwd.
-code_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(code_path)
+code_path = os.path.dirname(os.path.abspath(__file__))
+if code_path not in sys.path:
+    sys.path.insert(0, code_path)
 
 from optim_factory import create_optimizer, LayerDecayValueAssigner
 from engine import train_one_epoch, evaluate
@@ -159,25 +161,7 @@ args.train_test_mode = 'intrascan'
 args.TR = 1.4
 args.window_sec = 16
 args.model_hz = 200
-args.ch_names = []  # filled from Algermissen npz in get_dataset / main
-
-# -----------------------------------------------------------------------------
-# CROSS-SUBJECT / VU PATH config (unused while dataset=='algermissen')
-# Enable by setting e.g. dataset='VU', train_test_mode='full_test', and the
-# paths below. See get_dataset() and __main__ banners.
-# -----------------------------------------------------------------------------
-args.mri_sync_event = 'R149'
-args.prepro_datapath = None  # optional pickle for prepare_full_dataloader
-args.save_input_tensor = False
-args.split_index_sheet = str(
-    Path(os.path.dirname(os.path.abspath(__file__))) / 'scan_split_example.xlsx'
-)
-# Standard 26-ch VU montage (paper). Used when dataset == 'VU'.
-VU_CH_NAMES = [
-    'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7', 'F8',
-    'T7', 'T8', 'P7', 'P8', 'FPZ', 'FZ', 'CZ', 'PZ', 'POZ', 'OZ', 'FT9', 'FT10',
-    'TP9', 'TP10',
-]
+args.ch_names = []  # filled from the npz channel names in get_dataset / main
 
 
 def list_algermissen_subjects(dataset_root, skip=None):
@@ -288,75 +272,17 @@ def get_models(args):
 
 
 def get_dataset(args):
-    """Load train/test/val TensorDatasets (Algermissen default, or VU/cross-subject)."""
+    """Load train/test/val TensorDatasets for one intrascan subject."""
     metrics = ["mse", "corr"]
-    spec_chan_ind = None
-
-    # ----- LIVE DEFAULT: Algermissen intrascan -----
-    if args.dataset == 'algermissen':
-        train_dataset, test_dataset, val_dataset, ch_names = \
-            get_datasets.prepare_algermissen_onesub_dataloader(
-                args.dataset_root,
-                args.dataname,
-                model_hz=args.model_hz,
-                window_sec=args.window_sec,
-                tr=args.TR,
-            )
-        return train_dataset, test_dataset, val_dataset, ch_names, metrics, spec_chan_ind
-
-    # =============================================================================
-    # CROSS-SUBJECT / VU PATH (isolated; runs when args.dataset != 'algermissen')
-    # -----------------------------------------------------------------------------
-    # - train_test_mode == 'intrascan'     -> one VU scan (prepare_onesub_dataloader)
-    # - train_test_mode == 'full_test'     -> cross-subject via split_index_sheet
-    #                                        or prepro_datapath pickle
-    # - train_test_mode == 'full_retainvu' -> same full loader; subset ch_names
-    # - else (generic pre-epoched npz)     -> prepare_onesub_npz_dataloader
-    # =============================================================================
-    if args.train_test_mode == 'full_test':
-        train_dataset, test_dataset, val_dataset = \
-            get_datasets.prepare_full_dataloader(args)
-        if args.dataset == 'VU':
-            ch_names = list(VU_CH_NAMES)
-        else:
-            ch_names = list(args.ch_names)
-            if not ch_names:
-                raise ValueError(
-                    "Non-VU full_test requires args.ch_names to be set.")
-    elif args.train_test_mode == 'full_retainvu':
-        train_dataset, test_dataset, val_dataset = \
-            get_datasets.prepare_full_dataloader(args)
-        ch_names_full_vu = list(VU_CH_NAMES)
-        ch_names = [
-            'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2',
-            'F7', 'F8', 'T7', 'T8', 'P7', 'P8', 'FZ', 'CZ', 'PZ', 'OZ',
-            'TP9', 'TP10', 'POZ',
-        ]
-        spec_chan_ind = [ch_names_full_vu.index(ch) for ch in ch_names]
-    elif args.dataset == 'VU' or args.train_test_mode == 'intrascan':
-        # VU (or other) single-scan intrascan via EEGLAB+DiFuMo paper loader.
-        if args.dataset == 'VU':
-            train_dataset, test_dataset, val_dataset = \
-                get_datasets.prepare_onesub_dataloader(args)
-            ch_names = list(VU_CH_NAMES)
-        else:
-            # Pre-epoched single-file npz helper (legacy live-file API).
-            ch_names = list(args.ch_names)
-            train_dataset, test_dataset, val_dataset = \
-                get_datasets.prepare_onesub_npz_dataloader(
-                    args.dataset_root, args.dataname, ch_names, tr=args.TR)
-            if not ch_names:
-                raise ValueError(
-                    "Non-VU npz intrascan requires args.ch_names to be set.")
-    else:
-        raise ValueError(
-            f"Unsupported combo dataset={args.dataset!r} "
-            f"train_test_mode={args.train_test_mode!r}")
-    # =============================================================================
-    # END CROSS-SUBJECT / VU PATH
-    # =============================================================================
-
-    return train_dataset, test_dataset, val_dataset, ch_names, metrics, spec_chan_ind
+    train_dataset, test_dataset, val_dataset, ch_names = \
+        get_datasets.prepare_intrascan_dataloader(
+            args.dataset_root,
+            args.dataname,
+            model_hz=args.model_hz,
+            window_sec=args.window_sec,
+            tr=args.TR,
+        )
+    return train_dataset, test_dataset, val_dataset, ch_names, metrics
 
 
 def main(args):
@@ -384,7 +310,7 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train, dataset_test, dataset_val, ch_names, metrics, spec_chan_ind = get_dataset(args)
+    dataset_train, dataset_test, dataset_val, ch_names, metrics = get_dataset(args)
     ch_names = [c.upper() for c in ch_names]
     args.ch_names = ch_names
 
@@ -426,13 +352,8 @@ def main(args):
         drop_last=True,
     )
 
-    # CROSS-SUBJECT / VU: paper used smaller val/test batches for multi-scan full_test.
-    if args.dataset == "VU" and args.train_test_mode == 'full_test':
-        bs_val = int(len(dataset_val) / 5)
-        bs_test = int(len(dataset_test) / 6)
-    else:
-        bs_val = len(dataset_val)
-        bs_test = len(dataset_test)
+    bs_val = len(dataset_val)
+    bs_test = len(dataset_test)
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
         batch_size=max(bs_val, 1),
@@ -569,7 +490,7 @@ def main(args):
             log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
-            ch_names=ch_names, is_binary=args.nb_roi == 1, spec_chan=spec_chan_ind
+            ch_names=ch_names, is_binary=args.nb_roi == 1
         )
 
         val_stats = evaluate(data_loader_val, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
@@ -688,57 +609,28 @@ if __name__ == '__main__':
     Path(checkpoint_root).mkdir(parents=True, exist_ok=True)
     print(f"Artifact root ({TRAINING_MODE}): {checkpoint_root}")
 
-    # ----- LIVE DEFAULT: Algermissen per-subject intrascan -----
-    # SLURM array / NEUROBOLT_SUBJECT → one subject; otherwise loop all.
-    if args.dataset == 'algermissen' and args.train_test_mode == 'intrascan':
-        all_subjects = list_algermissen_subjects(
-            args.dataset_root, skip=ALGERMISSEN_SKIP)
-        subjects = select_subjects(all_subjects)
-        print(f"Algermissen subject list ({len(all_subjects)}): {all_subjects}")
-        print(f"This job will train: {subjects}")
-        for i, s in enumerate(all_subjects):
-            print(f"  array task {i} -> {s}")
+    # NEUROBOLT_SUBJECT or SLURM_ARRAY_TASK_ID → one subject; otherwise every subject.
+    all_subjects = list_algermissen_subjects(
+        args.dataset_root, skip=ALGERMISSEN_SKIP)
+    subjects = select_subjects(all_subjects)
+    print(f"Subject list ({len(all_subjects)}): {all_subjects}")
+    print(f"This job will train: {subjects}")
+    for i, s in enumerate(all_subjects):
+        print(f"  array task {i} -> {s}")
 
-        for subject in subjects:
-            # Skip-completed (not live). Copy into this loop if re-running a
-            # full all-subjects job on `short` after a timeout:
-            hits = list(Path(checkpoint_root).glob(
-                f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))
-            hits += list(Path(checkpoint_path).glob(
-                f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))  # old flat runs/
-            if hits:
-                print(f"Skipping {subject}: found {hits[0]}")
-                continue
-            print(
-                f"\n{'='*60}\n"
-                f"Starting NeuroBOLT ({TRAINING_MODE}) training for {subject}\n"
-                f"{'='*60}\n")
-            args.dataname = subject
-            prepare_run_dirs(args, subject, checkpoint_root)
-            main(args)
-            print(f"Completed training for {subject}")
-        print("\nAll subjects completed!")
-
-    # =============================================================================
-    # CROSS-SUBJECT / VU PATH entry (isolated; runs when not Algermissen intrascan)
-    # -----------------------------------------------------------------------------
-    # Enable by changing Namespace above, e.g.:
-    #   args.dataset = 'VU'
-    #   args.dataset_root = './data/'          # EEG/ + fMRI_difumo/
-    #   args.labels_roi = 'Thalamus'
-    #   args.TR = 2.1
-    #   args.train_test_mode = 'full_test'     # or 'intrascan' with dataname
-    #   args.split_index_sheet = './scan_split_example.xlsx'
-    #   args.dataname = 'sub11-scan01'         # only needed for intrascan
-    # Then: one call to main(args) (no Algermissen subject loop).
-    # =============================================================================
-    else:
+    for subject in subjects:
+        # Skip only a checkpoint already written under this mode's runs/ folder.
+        hits = list(Path(checkpoint_root).glob(
+            f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))
+        if hits:
+            print(f"Skipping {subject}: found {hits[0]}")
+            continue
         print(
-            f"Running non-Algermissen path: dataset={args.dataset}, "
-            f"train_test_mode={args.train_test_mode}"
-        )
-        prepare_run_dirs(args, args.dataname, checkpoint_root)
+            f"\n{'='*60}\n"
+            f"Starting NeuroBOLT ({TRAINING_MODE}) training for {subject}\n"
+            f"{'='*60}\n")
+        args.dataname = subject
+        prepare_run_dirs(args, subject, checkpoint_root)
         main(args)
-    # =============================================================================
-    # END CROSS-SUBJECT / VU PATH entry
-    # =============================================================================
+        print(f"Completed training for {subject}")
+    print("\nAll subjects completed!")
