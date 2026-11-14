@@ -118,20 +118,15 @@ print(f"                       using device: {args.device}")
 args.model = 'neurobolt_default'
 args.update_freq = 2
 args.qkv_bias = False
-args.rel_pos_bias = False
 args.abs_pos_emb = True
 args.layer_scale_init_value = 0.1
-args.input_size = 200
 args.attn_drop_rate = 0.0
 args.drop_path = 0.1
-args.model_ema = False  # kept so runtime.auto_load_model / save_model see the flag
 args.opt = 'adamw'
 args.opt_eps = 1e-8
-args.opt_betas = None
 args.clip_grad = None
 args.weight_decay_end = None
 args.layer_decay = 0.65
-args.warmup_lr = 1e-6
 args.min_lr = 1e-6
 args.warmup_epochs = 5
 args.warmup_steps = -1
@@ -140,7 +135,6 @@ args.model_prefix = ''
 args.model_filter_name = 'gzp'
 args.init_scale = 0.001
 args.use_mean_pooling = True
-args.disable_weight_decay_on_rel_pos_bias = False
 args.seed = 12345
 args.resume = ''
 args.auto_resume = False
@@ -150,13 +144,11 @@ args.dist_eval = True
 args.num_workers = 1
 args.pin_mem = True
 args.world_size = 1
-args.local_rank = -1
 args.dist_on_itp = False
 args.dist_url = 'env://'
 
 args.nb_roi = 1
 args.labels_roi = 'VS'
-args.dataset = 'algermissen'
 args.train_test_mode = 'intrascan'
 args.TR = 1.4
 args.window_sec = 16
@@ -257,10 +249,8 @@ def get_models(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         attn_drop_rate=args.attn_drop_rate,
-        drop_block_rate=None,
         use_mean_pooling=args.use_mean_pooling,
         init_scale=args.init_scale,
-        use_rel_pos_bias=args.rel_pos_bias,
         use_abs_pos_emb=args.abs_pos_emb,
         init_values=args.layer_scale_init_value,
         qkv_bias=args.qkv_bias,
@@ -275,7 +265,7 @@ def get_dataset(args):
     """Load train/test/val TensorDatasets for one intrascan subject."""
     metrics = ["mse", "corr"]
     train_dataset, test_dataset, val_dataset, ch_names = \
-        get_datasets.prepare_intrascan_dataloader(
+        get_datasets.prepare_algermissen_onesub_dataloader(
             args.dataset_root,
             args.dataname,
             model_hz=args.model_hz,
@@ -377,8 +367,6 @@ def main(args):
 
     patch_size = model.patch_size
     print("Patch size = %s" % str(patch_size))
-    args.window_size = (1, args.input_size // patch_size)
-    args.patch_size = patch_size
 
     if args.finetune:
         if args.finetune.startswith('https'):
