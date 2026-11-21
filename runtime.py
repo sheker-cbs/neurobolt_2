@@ -577,15 +577,9 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
 def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None,
                save_ckpt_freq=1):
     epoch_name = str(epoch)
-    if args.labels_roi == "Heschl’s gyrus":
-        label_roi = "Heschl gyrus_smooth_16s"
-    else:
-        label_roi = args.labels_roi + "_smooth_16s"
+    label_roi = args.labels_roi + "_smooth_16s"
 
-    if args.train_test_mode == 'intrascan':
-        subdir_name = f"/{args.dataname}-{label_roi}-{args.model}-{args.lr}-{args.batch_size}"
-    else:
-        subdir_name = f"/{args.dataset}-{args.train_test_mode}-full-{label_roi}-{args.model}-{args.lr}-{args.batch_size}"
+    subdir_name = f"/{args.dataname}-{label_roi}-{args.model}-{args.lr}-{args.batch_size}"
 
     output_dir = Path(args.output_dir + subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
