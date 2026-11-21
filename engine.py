@@ -28,11 +28,6 @@ def train_class_batch(model, samples, target, criterion, ch_names, spec_chan=Non
     return loss, outputs
 
 
-def get_loss_scale_for_deepspeed(model):
-    optimizer = model.optimizer
-    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
-
-
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
@@ -50,11 +45,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    if loss_scaler is None:
-        model.zero_grad()
-        model.micro_steps = 0
-    else:
-        optimizer.zero_grad()
+    optimizer.zero_grad()
 
     for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
@@ -77,15 +68,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if is_binary:
             targets = targets.float().unsqueeze(-1)
 
-        if loss_scaler is None:
-            samples = samples.half()
+        with torch.cuda.amp.autocast(
+                enabled=False):  # todo enabled false added by Yamin 0723 , for solving the nan loss prob
             loss, output = train_class_batch(
                 model, samples, targets, criterion, input_chans, spec_chan)
-        else:
-            with torch.cuda.amp.autocast(
-                    enabled=False):  # todo enabled false added by Yamin 0723 , for solving the nan loss prob
-                loss, output = train_class_batch(
-                    model, samples, targets, criterion, input_chans, spec_chan)
 
         loss_value = loss.item()
 
@@ -93,30 +79,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        if loss_scaler is None:
-            loss /= update_freq
-            model.backward(loss)
-            model.step()
-
-            if (data_iter_step + 1) % update_freq == 0:
-                # model.zero_grad()
-                # Deepspeed will call step() & model.zero_grad() automatic
-                if model_ema is not None:
-                    model_ema.update(model)
-            grad_norm = None
-            loss_scale_value = get_loss_scale_for_deepspeed(model)
-        else:
-            # this attribute is added by timm on one optimizer (adahessian)
-            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss /= update_freq
-            grad_norm = loss_scaler(loss, optimizer, clip_grad=max_norm,
-                                    parameters=model.parameters(), create_graph=is_second_order,
-                                    update_grad=(data_iter_step + 1) % update_freq == 0)
-            if (data_iter_step + 1) % update_freq == 0:
-                optimizer.zero_grad()
-                if model_ema is not None:
-                    model_ema.update(model)
-            loss_scale_value = loss_scaler.state_dict()["scale"]
+        # this attribute is added by timm on one optimizer (adahessian)
+        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+        loss /= update_freq
+        grad_norm = loss_scaler(loss, optimizer, clip_grad=max_norm,
+                                parameters=model.parameters(), create_graph=is_second_order,
+                                update_grad=(data_iter_step + 1) % update_freq == 0)
+        if (data_iter_step + 1) % update_freq == 0:
+            optimizer.zero_grad()
+            if model_ema is not None:
+                model_ema.update(model)
+        loss_scale_value = loss_scaler.state_dict()["scale"]
 
         torch.cuda.synchronize()
 
