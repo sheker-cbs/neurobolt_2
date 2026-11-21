@@ -2,33 +2,21 @@ import io
 import os
 import math
 import time
-import json
 import glob
 from collections import defaultdict, deque
 import datetime
 import numpy as np
 from timm.utils import get_state_dict
-import re
 
 from pathlib import Path
-import argparse
 
 import torch
 import torch.distributed as dist
 from torch import inf
-import h5py
 
 from tensorboardX import SummaryWriter
 
-import pickle
-from scipy.signal import resample
-import pandas as pd
-from sklearn.metrics import r2_score
 from sklearn.metrics import mean_squared_error
-from scipy.stats import pearsonr
-
-
-from scipy.signal import butter, filtfilt
 
 standard_1020 = [
     'Fp1', 'Fpz', 'Fp2',
@@ -47,28 +35,6 @@ standard_1020 = [
     "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
     "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
 ]
-
-
-def bool_flag(s):
-    """
-    Parse boolean arguments from the command line.
-    """
-    FALSY_STRINGS = {"off", "false", "0"}
-    TRUTHY_STRINGS = {"on", "true", "1"}
-    if s.lower() in FALSY_STRINGS:
-        return False
-    elif s.lower() in TRUTHY_STRINGS:
-        return True
-    else:
-        raise argparse.ArgumentTypeError("invalid value for a boolean flag")
-
-
-def get_model(model):
-    if isinstance(model, torch.nn.DataParallel) \
-            or isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        return model.module
-    else:
-        return model
 
 
 class SmoothedValue(object):
@@ -237,12 +203,6 @@ class TensorboardLogger(object):
             assert isinstance(v, (float, int))
             self.writer.add_scalar(head + "/" + k, v, self.step if step is None else step)
 
-    def update_image(self, head='images', step=None, **kwargs):
-        for k, v in kwargs.items():
-            if v is None:
-                continue
-            self.writer.add_image(head + "/" + k, v, self.step if step is None else step)
-
     def flush(self):
         self.writer.flush()
 
@@ -299,83 +259,6 @@ def is_main_process():
 def save_on_master(*args, **kwargs):
     if is_main_process():
         torch.save(*args, **kwargs)
-
-
-def all_reduce(tensor, op=dist.ReduceOp.SUM, async_op=False):
-    world_size = get_world_size()
-
-    if world_size == 1:
-        return tensor
-    dist.all_reduce(tensor, op=op, async_op=async_op)
-
-    return tensor
-
-
-def all_gather_batch(tensors):
-    """
-    Performs all_gather operation on the provided tensors.
-    """
-    # Queue the gathered tensors
-    world_size = get_world_size()
-    # There is no need for reduction in the single-proc case
-    if world_size == 1:
-        return tensors
-    tensor_list = []
-    output_tensor = []
-    for tensor in tensors:
-        tensor_all = [torch.ones_like(tensor) for _ in range(world_size)]
-        dist.all_gather(
-            tensor_all,
-            tensor,
-            async_op=False  # performance opt
-        )
-
-        tensor_list.append(tensor_all)
-
-    for tensor_all in tensor_list:
-        output_tensor.append(torch.cat(tensor_all, dim=0))
-    return output_tensor
-
-
-class GatherLayer(torch.autograd.Function):
-    """
-    Gather tensors from all workers with support for backward propagation:
-    This implementation does not cut the gradients as torch.distributed.all_gather does.
-    """
-
-    @staticmethod
-    def forward(ctx, x):
-        output = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
-        dist.all_gather(output, x)
-        return tuple(output)
-
-    @staticmethod
-    def backward(ctx, *grads):
-        all_gradients = torch.stack(grads)
-        dist.all_reduce(all_gradients)
-        return all_gradients[dist.get_rank()]
-
-
-def all_gather_batch_with_grad(tensors):
-    """
-    Performs all_gather operation on the provided tensors.
-    Graph remains connected for backward grad computation.
-    """
-    # Queue the gathered tensors
-    world_size = get_world_size()
-    # There is no need for reduction in the single-proc case
-    if world_size == 1:
-        return tensors
-    tensor_list = []
-    output_tensor = []
-
-    for tensor in tensors:
-        tensor_all = GatherLayer.apply(tensor)
-        tensor_list.append(tensor_all)
-
-    for tensor_all in tensor_list:
-        output_tensor.append(torch.cat(tensor_all, dim=0))
-    return output_tensor
 
 
 def _get_rank_env():
@@ -482,19 +365,6 @@ def load_state_dict(model, state_dict, prefix='', ignore_missing="relative_posit
         print('\n'.join(error_msgs))
 
 
-def get_grad_norm(parameters, norm_type=2):
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
-    parameters = list(filter(lambda p: p.grad is not None, parameters))
-    norm_type = float(norm_type)
-    total_norm = 0
-    for p in parameters:
-        param_norm = p.grad.data.norm(norm_type)
-        total_norm += param_norm.item() ** norm_type
-    total_norm = total_norm ** (1. / norm_type)
-    return total_norm
-
-
 class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
@@ -574,8 +444,7 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     return schedule
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None,
-               save_ckpt_freq=1):
+def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
     epoch_name = str(epoch)
     if args.labels_roi == "Heschl’s gyrus":
         label_roi = "Heschl gyrus_smooth_16s"
@@ -590,130 +459,55 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
     output_dir = Path(args.output_dir + subdir_name)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not getattr(args, 'enable_deepspeed', False):
-        checkpoint_paths = [output_dir / 'checkpoint.pth']
-        if epoch is not None:
-            checkpoint_paths = [output_dir / ('checkpoint-epoch%s.pth' % epoch_name), ]
-        elif (epoch + 1) % save_ckpt_freq == 0:
-            checkpoint_paths.append(output_dir / ('checkpoint-epoch%s.pth' % epoch_name))
-
-        for checkpoint_path in checkpoint_paths:
-            to_save = {
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                # 'scaler': loss_scaler.state_dict(),
-                'args': args,
-            }
-            if loss_scaler is not None:
-                to_save['scaler'] = loss_scaler.state_dict()
-
-            if model_ema is not None:
-                to_save['model_ema'] = get_state_dict(model_ema)
-
-            if optimizer_disc is not None:
-                to_save['optimizer_disc'] = optimizer_disc.state_dict()
-
-            save_on_master(to_save, checkpoint_path)
-    else:
-        client_state = {'epoch': epoch}
-        if model_ema is not None:
-            client_state['model_ema'] = get_state_dict(model_ema)
-        model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
+    checkpoint_path = output_dir / ('checkpoint-epoch%s.pth' % epoch_name)
+    to_save = {
+        'model': model_without_ddp.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'epoch': epoch,
+        'args': args,
+    }
+    if loss_scaler is not None:
+        to_save['scaler'] = loss_scaler.state_dict()
+    if model_ema is not None:
+        to_save['model_ema'] = get_state_dict(model_ema)
+    save_on_master(to_save, checkpoint_path)
 
 
-def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None):
+def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
     output_dir = Path(args.output_dir)
 
-    if not getattr(args, 'enable_deepspeed', False):
-        # torch.amp
-        if args.auto_resume and len(args.resume) == 0:
-            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint.pth'))
-            if len(all_checkpoints) > 0:
-                args.resume = os.path.join(output_dir, 'checkpoint.pth')
-            else:
-                all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*.pth'))
-                latest_ckpt = -1
-                for ckpt in all_checkpoints:
-                    t = ckpt.split('-')[-1].split('.')[0]
-                    if t.isdigit():
-                        latest_ckpt = max(int(t), latest_ckpt)
-                if latest_ckpt >= 0:
-                    args.resume = os.path.join(output_dir, 'checkpoint-%d.pth' % latest_ckpt)
-            print("Auto resume checkpoint: %s" % args.resume)
-
-        if args.resume:
-            if args.resume.startswith('https'):
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    args.resume, map_location='cpu', check_hash=True)
-            else:
-                checkpoint = torch.load(args.resume, map_location='cpu')
-            model_without_ddp.load_state_dict(checkpoint['model'])  # strict: bool=True, , strict=False
-            print("Resume checkpoint %s" % args.resume)
-            if 'optimizer' in checkpoint and 'epoch' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                print(f"Resume checkpoint at epoch {checkpoint['epoch']}")
-                args.start_epoch = 1  # checkpoint['epoch'] + 1
-                if hasattr(args, 'model_ema') and args.model_ema:
-                    _load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-                if 'scaler' in checkpoint:
-                    loss_scaler.load_state_dict(checkpoint['scaler'])
-                print("With optim & sched!")
-            if 'optimizer_disc' in checkpoint:
-                optimizer_disc.load_state_dict(checkpoint['optimizer_disc'])
-    else:
-        # deepspeed, only support '--auto_resume'.
-        if args.auto_resume:
-            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*'))
+    if args.auto_resume and len(args.resume) == 0:
+        all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint.pth'))
+        if len(all_checkpoints) > 0:
+            args.resume = os.path.join(output_dir, 'checkpoint.pth')
+        else:
+            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*.pth'))
             latest_ckpt = -1
             for ckpt in all_checkpoints:
                 t = ckpt.split('-')[-1].split('.')[0]
                 if t.isdigit():
                     latest_ckpt = max(int(t), latest_ckpt)
             if latest_ckpt >= 0:
-                args.resume = os.path.join(output_dir, 'checkpoint-%d' % latest_ckpt)
-                print("Auto resume checkpoint: %d" % latest_ckpt)
-                _, client_states = model.load_checkpoint(args.output_dir, tag='checkpoint-%d' % latest_ckpt)
-                args.start_epoch = client_states['epoch'] + 1
-                if model_ema is not None:
-                    if args.model_ema:
-                        _load_checkpoint_for_ema(model_ema, client_states['model_ema'])
+                args.resume = os.path.join(output_dir, 'checkpoint-%d.pth' % latest_ckpt)
+        print("Auto resume checkpoint: %s" % args.resume)
 
-
-def create_ds_config(args):
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    with open(os.path.join(args.output_dir, "latest"), mode="w") as f:
-        pass
-
-    args.deepspeed_config = os.path.join(args.output_dir, "deepspeed_config.json")
-    with open(args.deepspeed_config, mode="w") as writer:
-        ds_config = {
-            "train_batch_size": args.batch_size * args.update_freq * get_world_size(),
-            "train_micro_batch_size_per_gpu": args.batch_size,
-            "steps_per_print": 1000,
-            "optimizer": {
-                "type": "Adam",
-                "adam_w_mode": True,
-                "params": {
-                    "lr": args.lr,
-                    "weight_decay": args.weight_decay,
-                    "bias_correction": True,
-                    "betas": [
-                        0.9,
-                        0.999
-                    ],
-                    "eps": 1e-8
-                }
-            },
-            "fp16": {
-                "enabled": True,
-                "loss_scale": 0,
-                "initial_scale_power": 7,
-                "loss_scale_window": 128
-            }
-        }
-
-        writer.write(json.dumps(ds_config, indent=2))
+    if args.resume:
+        if args.resume.startswith('https'):
+            checkpoint = torch.hub.load_state_dict_from_url(
+                args.resume, map_location='cpu', check_hash=True)
+        else:
+            checkpoint = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(checkpoint['model'])  # strict: bool=True, , strict=False
+        print("Resume checkpoint %s" % args.resume)
+        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print(f"Resume checkpoint at epoch {checkpoint['epoch']}")
+            args.start_epoch = 1  # checkpoint['epoch'] + 1
+            if hasattr(args, 'model_ema') and args.model_ema:
+                _load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+            if 'scaler' in checkpoint:
+                loss_scaler.load_state_dict(checkpoint['scaler'])
+            print("With optim & sched!")
 
 
 def get_input_chans(ch_names):
