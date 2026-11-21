@@ -116,29 +116,23 @@ print(f"                       using device: {args.device}")
 args.model = 'neurobolt_default'
 args.update_freq = 2
 args.qkv_bias = False
-args.rel_pos_bias = False
 args.abs_pos_emb = True
 args.layer_scale_init_value = 0.1
-args.input_size = 200
 args.attn_drop_rate = 0.0
 args.drop_path = 0.1
-args.model_ema = False  # kept so runtime.auto_load_model / save_model see the flag
 args.opt = 'adamw'
 args.opt_eps = 1e-8
-args.opt_betas = None
 args.clip_grad = None
 args.weight_decay_end = None
 args.layer_decay = 0.65
-args.warmup_lr = 1e-6
 args.min_lr = 1e-6
 args.warmup_epochs = 5
 args.warmup_steps = -1
 args.model_key = 'model|module'
 args.model_prefix = ''
-args.model_filter_name = 'gzp'
+args.model_filter_name = 'gzp'  # any non-empty value strips a "student." prefix
 args.init_scale = 0.001
 args.use_mean_pooling = True
-args.disable_weight_decay_on_rel_pos_bias = False
 args.seed = 12345
 args.resume = ''
 args.auto_resume = False
@@ -148,7 +142,6 @@ args.dist_eval = True
 args.num_workers = 1
 args.pin_mem = True
 args.world_size = 1
-args.local_rank = -1
 args.dist_on_itp = False
 args.dist_url = 'env://'
 
@@ -163,15 +156,9 @@ args.ch_names = []  # filled from Algermissen npz in get_dataset / main
 
 # -----------------------------------------------------------------------------
 # CROSS-SUBJECT / VU PATH config (unused while dataset=='algermissen')
-# Enable by setting e.g. dataset='VU', train_test_mode='full_test', and the
-# paths below. See get_dataset() and __main__ banners.
+# Enable by setting e.g. dataset='VU' and train_test_mode='full_test'.
+# The loaders this path calls are not defined in dataset_maker/get_datasets.py.
 # -----------------------------------------------------------------------------
-args.mri_sync_event = 'R149'
-args.prepro_datapath = None  # optional pickle for prepare_full_dataloader
-args.save_input_tensor = False
-args.split_index_sheet = str(
-    Path(os.path.dirname(os.path.abspath(__file__))) / 'scan_split_example.xlsx'
-)
 # Standard 26-ch VU montage (paper). Used when dataset == 'VU'.
 VU_CH_NAMES = [
     'FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7', 'F8',
@@ -273,10 +260,8 @@ def get_models(args):
         drop_rate=args.drop,
         drop_path_rate=args.drop_path,
         attn_drop_rate=args.attn_drop_rate,
-        drop_block_rate=None,
         use_mean_pooling=args.use_mean_pooling,
         init_scale=args.init_scale,
-        use_rel_pos_bias=args.rel_pos_bias,
         use_abs_pos_emb=args.abs_pos_emb,
         init_values=args.layer_scale_init_value,
         qkv_bias=args.qkv_bias,
@@ -308,8 +293,7 @@ def get_dataset(args):
     # CROSS-SUBJECT / VU PATH (isolated; runs when args.dataset != 'algermissen')
     # -----------------------------------------------------------------------------
     # - train_test_mode == 'intrascan'     -> one VU scan (prepare_onesub_dataloader)
-    # - train_test_mode == 'full_test'     -> cross-subject via split_index_sheet
-    #                                        or prepro_datapath pickle
+    # - train_test_mode == 'full_test'     -> cross-subject (prepare_full_dataloader)
     # - train_test_mode == 'full_retainvu' -> same full loader; subset ch_names
     # - else (generic pre-epoched npz)     -> prepare_onesub_npz_dataloader
     # =============================================================================
@@ -456,8 +440,6 @@ def main(args):
 
     patch_size = model.patch_size
     print("Patch size = %s" % str(patch_size))
-    args.window_size = (1, args.input_size // patch_size)
-    args.patch_size = patch_size
 
     if args.finetune:
         if args.finetune.startswith('https'):
@@ -728,7 +710,6 @@ if __name__ == '__main__':
     #   args.labels_roi = 'Thalamus'
     #   args.TR = 2.1
     #   args.train_test_mode = 'full_test'     # or 'intrascan' with dataname
-    #   args.split_index_sheet = './scan_split_example.xlsx'
     #   args.dataname = 'sub11-scan01'         # only needed for intrascan
     # Then: one call to main(args) (no Algermissen subject loop).
     # =============================================================================
