@@ -16,9 +16,10 @@ Script purpose
 --------------
 This script trains one NeuroBOLT model per subject on the Algermissen EEG/fMRI
 dataset (intra-subject / "intrascan"). Configuration is set on an
-`argparse.Namespace` in-place (no CLI parsing). Subject selection for SLURM
-arrays uses env vars `NEUROBOLT_SUBJECT` or `SLURM_ARRAY_TASK_ID` (see
-`select_subjects`). Each job writes a unique folder under `checkpoints/runs/`.
+`argparse.Namespace` in-place (no CLI parsing). Subject selection uses
+`NEUROBOLT_SUBJECT`, else `NEUROBOLT_SUBJECTS`, else `SLURM_ARRAY_TASK_ID`
+(see `select_subjects`). `NEUROBOLT_CAMPAIGN_DIR`, when set, is the folder
+runs are written under. Each job writes a unique folder under `runs/`.
 """
 
 import argparse
@@ -175,17 +176,37 @@ def list_algermissen_subjects(dataset_root, skip=None):
 
 
 def select_subjects(subjects):
-    """One subject if NEUROBOLT_SUBJECT or SLURM_ARRAY_TASK_ID is set; else all.
+    """Subjects for this job.
 
-    Mapping: SLURM_ARRAY_TASK_ID is a 0-based index into `subjects` (already
-    skip-filtered). NEUROBOLT_SUBJECT (e.g. sub-001) wins when both are set.
+    Priority: NEUROBOLT_SUBJECT (one id), then NEUROBOLT_SUBJECTS (comma
+    separated, the batch-file path), then SLURM_ARRAY_TASK_ID (0-based index
+    into `subjects`, already skip-filtered). Otherwise every subject.
     """
+    known = set(subjects)
     env_sub = os.environ.get('NEUROBOLT_SUBJECT', '').strip()
     if env_sub:
-        if env_sub not in subjects:
+        if env_sub not in known:
             raise ValueError(
                 f"NEUROBOLT_SUBJECT={env_sub!r} not in subject list: {subjects}")
         return [env_sub]
+    env_subs = os.environ.get('NEUROBOLT_SUBJECTS', '').strip()
+    if env_subs:
+        chosen = []
+        seen = set()
+        for part in env_subs.split(','):
+            name = part.strip()
+            if not name or name in seen:
+                continue
+            if name not in known:
+                raise ValueError(
+                    f"NEUROBOLT_SUBJECTS entry {name!r} not in subject list: "
+                    f"{subjects}")
+            seen.add(name)
+            chosen.append(name)
+        if not chosen:
+            raise ValueError(
+                f"NEUROBOLT_SUBJECTS={env_subs!r} has no subject ids")
+        return chosen
     array_id = os.environ.get('SLURM_ARRAY_TASK_ID', '').strip()
     if array_id != '':
         i = int(array_id)
@@ -206,7 +227,7 @@ def prepare_run_dirs(args, subject, checkpoint_root):
         log.txt, run_meta.json, predictions_vs_true_epoch*.png, tb/,
         {dataname}-VS_smooth_16s-.../   (from runtime.save_model)
     Off SLURM, JOB is `local` and `_a{ARRAY}` is omitted.
-    `checkpoint_root` should already be the mode folder (…/log_baseline or …/log_attn).
+    `checkpoint_root` is the mode folder, or NEUROBOLT_CAMPAIGN_DIR when set.
     """
     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
@@ -597,13 +618,19 @@ def main(args):
              metrics=metrics, is_binary=args.nb_roi == 1)
 
 
+def _env_flag(name):
+    return os.environ.get(name, '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 if __name__ == '__main__':
-    # Mode-separated root: …/checkpoints/log_baseline or …/log_attn
-    checkpoint_root = mode_checkpoint_root
+    # submit_sub.sh sets NEUROBOLT_CAMPAIGN_DIR to
+    # {checkpoints}/{log_baseline|log_attn}/{YYYYMMDD-HHMMSS}.
+    # Without it, runs land directly under the mode folder.
+    campaign = os.environ.get('NEUROBOLT_CAMPAIGN_DIR', '').strip()
+    checkpoint_root = campaign or mode_checkpoint_root
     Path(checkpoint_root).mkdir(parents=True, exist_ok=True)
     print(f"Artifact root ({TRAINING_MODE}): {checkpoint_root}")
 
-    # SLURM array / NEUROBOLT_SUBJECT → one subject; otherwise loop all.
     all_subjects = list_algermissen_subjects(
         args.dataset_root, skip=ALGERMISSEN_SKIP)
     subjects = select_subjects(all_subjects)
@@ -612,16 +639,14 @@ if __name__ == '__main__':
     for i, s in enumerate(all_subjects):
         print(f"  array task {i} -> {s}")
 
+    skip_completed = _env_flag('NEUROBOLT_SKIP_COMPLETED')
     for subject in subjects:
-        # Skip-completed (not live). Copy into this loop if re-running a
-        # full all-subjects job on `short` after a timeout:
-        hits = list(Path(checkpoint_root).glob(
-            f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))
-        hits += list(Path(checkpoint_path).glob(
-            f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))  # old flat runs/
-        if hits:
-            print(f"Skipping {subject}: found {hits[0]}")
-            continue
+        if skip_completed:
+            hits = list(Path(checkpoint_root).glob(
+                f"runs/*_{subject}/{subject}-VS_smooth_16s-*/checkpoint-epoch*.pth"))
+            if hits:
+                print(f"Skipping {subject}: found {hits[0]}")
+                continue
         print(
             f"\n{'='*60}\n"
             f"Starting NeuroBOLT ({TRAINING_MODE}) training for {subject}\n"
