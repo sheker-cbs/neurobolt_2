@@ -3,8 +3,9 @@
 # no --array, no nested sbatch. Each job runs subjects sequentially on one GPU.
 #
 # Flow:
-#   1) prepare_subject_batches.sh  → subject_batches/batch_NNN.txt
-#   2) this script                 → sbatch --job-name=… run_neuro.sh <batchfile>
+#   1) this script writes subject_batches/batch_NNN.txt
+#   2) sbatch --job-name=… run_neuro.sh <batchfile>
+#      run_neuro.sh exports NEUROBOLT_SUBJECTS; main.py trains that list.
 #
 # Default (new submit): creates one dated campaign folder for the whole wave:
 #   {CHECKPOINT_PATH}/log_baseline/YYYYMMDD-HHMMSS/   (or log_attn/)
@@ -21,21 +22,21 @@
 # (no scan). Override: export ALGERMISSEN_DATA_ROOT=… or DATA_ROOT=…
 #
 # Usage:
-#   bash submit_all_subjects.sh
-#   bash submit_all_subjects.sh --batch-size 5
-#   SUBJECTS_PER_JOB=5 bash submit_all_subjects.sh
-#   bash submit_all_subjects.sh --one-per-job
-#   bash submit_all_subjects.sh --dry-run
-#   bash submit_all_subjects.sh --reuse-batches   # skip prepare if files exist
-#   bash submit_all_subjects.sh sub-001 sub-007 sub-012
-#   bash submit_all_subjects.sh --batch-size 3 sub-001 sub-002 sub-003 sub-005
+#   bash submit_sub.sh
+#   bash submit_sub.sh --batch-size 5
+#   SUBJECTS_PER_JOB=5 bash submit_sub.sh
+#   bash submit_sub.sh --one-per-job
+#   bash submit_sub.sh --dry-run
+#   bash submit_sub.sh --reuse-batches   # skip prepare if files exist
+#   bash submit_sub.sh sub-001 sub-007 sub-012
+#   bash submit_sub.sh --batch-size 3 sub-001 sub-002 sub-003 sub-005
 #
 # Resume incomplete into existing campaign (latest for mode, or explicit):
-#   bash submit_all_subjects.sh --resume-incomplete
-#   bash submit_all_subjects.sh --resume-incomplete --campaign /path/to/…/20260820-113000
+#   bash submit_sub.sh --resume-incomplete
+#   bash submit_sub.sh --resume-incomplete --campaign /path/to/…/20260820-113000
 #
 # Attention mode (also switch #SBATCH log paths in run_neuro.sh to logs_attn/):
-#   NEUROBOLT_TRAINING_MODE=attention bash submit_all_subjects.sh
+#   NEUROBOLT_TRAINING_MODE=attention bash submit_sub.sh
 #
 # Manual single batch (set campaign yourself):
 #   export NEUROBOLT_CAMPAIGN_DIR=…/log_baseline/20260820-113000
@@ -187,7 +188,7 @@ if not meta:
         "timestamp": Path(campaign).name,
         "batch_size": int(batch_size),
         "subjects": subjects,
-        "created_by": "submit_all_subjects.sh",
+        "created_by": "submit_sub.sh",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 else:
@@ -205,6 +206,53 @@ path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 print(str(path))
 PY
+}
+
+# Write subject_batches/batch_NNN.txt. Explicit ids are used as given.
+# With no ids, scan the Algermissen npz root and drop the same skip set as main.py.
+write_subject_batches() {
+  local batch_size="$1"
+  local batch_dir="$2"
+  shift 2
+  local -a subjects=("$@")
+  local data_root="${DATA_ROOT:-${ALGERMISSEN_DATA_ROOT:-/data/p_03183/data/pav_algermissen/derived/py_imported/per_block/for_neurobolt}}"
+  if (( ${#subjects[@]} == 0 )); then
+    if [ ! -d "$data_root" ]; then
+      echo "ERROR: Algermissen data root not found: $data_root" >&2
+      echo "Set ALGERMISSEN_DATA_ROOT or DATA_ROOT, or pass explicit sub-XXX args." >&2
+      exit 1
+    fi
+    local f base id
+    local -a found=()
+    for f in "$data_root"/*_block*.npz; do
+      [ -f "$f" ] || continue
+      base="$(basename "$f")"
+      id="${base%%_block*}"
+      case "$id" in
+        sub-004|sub-015|sub-025) continue ;;
+      esac
+      found+=("$id")
+    done
+    if (( ${#found[@]} > 0 )); then
+      IFS=$'\n' subjects=($(printf '%s\n' "${found[@]}" | sort -u))
+      unset IFS
+    fi
+  fi
+  if (( ${#subjects[@]} == 0 )); then
+    echo "ERROR: no subjects to batch" >&2
+    exit 1
+  fi
+  mkdir -p "$batch_dir"
+  rm -f "$batch_dir"/batch_*.txt
+  local i batch_idx=0
+  local -a batch
+  for ((i = 0; i < ${#subjects[@]}; i += batch_size)); do
+    batch_idx=$((batch_idx + 1))
+    batch=("${subjects[@]:i:batch_size}")
+    printf '%s\n' "${batch[@]}" > "$(printf '%s/batch_%03d.txt' "$batch_dir" "$batch_idx")"
+  done
+  printf '%s\n' "$batch_size" > "$batch_dir/.batch_size"
+  echo "Wrote ${batch_idx} batch file(s) (${#subjects[@]} subjects) under ${batch_dir}/"
 }
 
 # ---------------------------------------------------------------------------
@@ -225,16 +273,11 @@ if (( REUSE_BATCHES )) && compgen -G "$BATCH_DIR"/batch_*.txt > /dev/null; then
 fi
 
 if (( need_prepare )) && (( ! RESUME_INCOMPLETE )); then
-  prepare_args=(--batch-size "$SUBJECTS_PER_JOB" --batch-dir "$BATCH_DIR")
-  if (( ${#EXPLICIT_SUBJECTS[@]} > 0 )); then
-    prepare_args+=("${EXPLICIT_SUBJECTS[@]}")
-  fi
-  bash "$SCRIPT_DIR/prepare_subject_batches.sh" "${prepare_args[@]}"
+  write_subject_batches "$SUBJECTS_PER_JOB" "$BATCH_DIR" "${EXPLICIT_SUBJECTS[@]}"
 elif (( RESUME_INCOMPLETE )) && (( need_prepare )) && (( ${#EXPLICIT_SUBJECTS[@]} == 0 )); then
   # Need a subject universe to filter; prepare into BATCH_DIR if missing.
   if ! compgen -G "$BATCH_DIR"/batch_*.txt > /dev/null; then
-    bash "$SCRIPT_DIR/prepare_subject_batches.sh" \
-      --batch-size "$SUBJECTS_PER_JOB" --batch-dir "$BATCH_DIR"
+    write_subject_batches "$SUBJECTS_PER_JOB" "$BATCH_DIR"
   fi
 elif (( RESUME_INCOMPLETE )) && (( ${#EXPLICIT_SUBJECTS[@]} > 0 )); then
   : # universe = explicit list below
@@ -294,10 +337,7 @@ if (( RESUME_INCOMPLETE )); then
   # Rebuild batches with incomplete only (dedicated dir; leave original batches).
   BATCH_DIR="$SCRIPT_DIR/subject_batches/resume_incomplete"
   mkdir -p "$BATCH_DIR"
-  bash "$SCRIPT_DIR/prepare_subject_batches.sh" \
-    --batch-size "$SUBJECTS_PER_JOB" \
-    --batch-dir "$BATCH_DIR" \
-    "${INCOMPLETE[@]}"
+  write_subject_batches "$SUBJECTS_PER_JOB" "$BATCH_DIR" "${INCOMPLETE[@]}"
 
   subjects_csv=$(IFS=,; echo "${INCOMPLETE[*]}")
   if (( ! DRY_RUN )); then
@@ -323,7 +363,7 @@ while IFS= read -r line; do
   [ -n "$line" ] && BATCH_FILES+=("$line")
 done < <(ls -1 "$BATCH_DIR"/batch_*.txt 2>/dev/null | sort)
 if [ "${#BATCH_FILES[@]}" -eq 0 ]; then
-  echo "ERROR: no batch files in $BATCH_DIR (run prepare_subject_batches.sh)" >&2
+  echo "ERROR: no batch files in $BATCH_DIR" >&2
   exit 1
 fi
 
