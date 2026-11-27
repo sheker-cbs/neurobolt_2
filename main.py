@@ -369,16 +369,21 @@ def main(args):
         drop_last=True,
     )
 
+    # Eval must not use the full split as one batch. Attention scores are
+    # [B, heads, tokens, tokens]; a ~200-window split is ~9 GiB for that
+    # matrix alone, and softmax allocates a second copy. Chunked eval still
+    # reports correlation on the concatenated predictions (engine.evaluate).
+    eval_batch_size = args.batch_size
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
-        batch_size=max(len(dataset_val), 1),
+        batch_size=eval_batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False
     )
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, sampler=sampler_test,
-        batch_size=max(len(dataset_test), 1),
+        batch_size=eval_batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False
