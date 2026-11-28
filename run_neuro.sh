@@ -5,12 +5,12 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=3:00:00
-# Fallback only. submit_sub.sh overrides these with a new directory per submit:
-#   logs_baseline/YYYYMMDD-HHMMSS/output_logs/%x_%j.out
-#   logs_baseline/YYYYMMDD-HHMMSS/error_logs/%x_%j.err
+# Fallback only. submit_sub.sh overrides these with a dated directory:
+#   logs/baseline/YYYY-MM-DD_HH:MM:SS/b001_<jobid>.out
+#   logs/baseline/YYYY-MM-DD_HH:MM:SS/b001_<jobid>.err
 # Slurm reads #SBATCH before bash runs, so $(date ...) here is not a timestamp.
-#SBATCH --output=logs_baseline/output_logs/neurobolt_%j.out
-#SBATCH --error=logs_baseline/error_logs/neurobolt_%j.err
+#SBATCH --output=logs/baseline/hand_%j.out
+#SBATCH --error=logs/baseline/hand_%j.err
 #
 # =============================================================================
 # NeuroBOLT SLURM job (SHiVAi-style): one batch per allocation, no --array.
@@ -20,16 +20,15 @@
 # Prerequisites:
 #   - conda env `neurobolt` available after `source ~/.bashrc`
 #   - sbatch FROM this code root (relative #SBATCH log paths)
-#   - dated logs: submit_sub.sh mkdir's
-#       logs_baseline/YYYYMMDD-HHMMSS/{output_logs,error_logs}
-#     (attention: logs_attn/) and passes --output/--error.
-#     Hand sbatch without those flags falls back to logs_baseline/output_logs/.
+#   - dated logs: submit_sub.sh mkdir's logs/baseline/YYYY-MM-DD_HH:MM:SS/
+#     (attention: logs/attn/) and passes --output/--error.
+#     Hand sbatch without those flags falls back to logs/baseline/hand_<jobid>.out.
 #   - bash submit_sub.sh writes subject_batches/batch_NNN.txt and submits
 #
 # Usage (preferred — job name set on the CLI; #SBATCH --job-name does not
 # expand bash variables at submit time):
-#   sbatch --job-name=neurobolt_batch_001 run_neuro.sh subject_batches/batch_001.txt
-#   sbatch --job-name=neurobolt_batch_001 run_neuro.sh batch_001
+#   sbatch --job-name=b001 run_neuro.sh subject_batches/batch_001.txt
+#   sbatch --job-name=b001 run_neuro.sh batch_001
 #   bash submit_sub.sh
 #
 # Env-only (no $1):
@@ -46,14 +45,14 @@
 # (for example gpu:turing:1).
 #
 # Training mode (Slurm fixes --output/--error at submit time):
-#   baseline  → logs_baseline/YYYYMMDD-HHMMSS/ + checkpoints/…/log_baseline/
-#   attention → logs_attn/YYYYMMDD-HHMMSS/     + checkpoints/…/log_attn/
+#   baseline  → logs/baseline/YYYY-MM-DD_HH:MM:SS/ + checkpoints/…/log_baseline/
+#   attention → logs/attn/YYYY-MM-DD_HH:MM:SS/     + checkpoints/…/log_attn/
 # submit_sub.sh passes the dated paths. For a hand submit:
-#   STAMP=$(date +%Y%m%d-%H%M%S)
-#   mkdir -p logs_attn/$STAMP/output_logs logs_attn/$STAMP/error_logs
-#   NEUROBOLT_TRAINING_MODE=attention sbatch \
-#     --output=logs_attn/$STAMP/output_logs/%x_%j.out \
-#     --error=logs_attn/$STAMP/error_logs/%x_%j.err \
+#   STAMP=$(date +%Y-%m-%d_%H:%M:%S)
+#   mkdir -p logs/attn/$STAMP
+#   NEUROBOLT_TRAINING_MODE=attention sbatch --job-name=b001 \
+#     --output=logs/attn/$STAMP/b001_%j.out \
+#     --error=logs/attn/$STAMP/b001_%j.err \
 #     run_neuro.sh …
 #
 # Checkpoints / TB:
@@ -141,9 +140,9 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 export NEUROBOLT_TRAINING_MODE="${NEUROBOLT_TRAINING_MODE:-baseline}"
 
 if [ "$NEUROBOLT_TRAINING_MODE" = "attention" ] || [ "$NEUROBOLT_TRAINING_MODE" = "attn" ]; then
-  mkdir -p logs_attn/output_logs logs_attn/error_logs
+  mkdir -p logs/attn
 else
-  mkdir -p logs_baseline/output_logs logs_baseline/error_logs
+  mkdir -p logs/baseline
 fi
 
 echo "NEUROBOLT_TRAINING_MODE=${NEUROBOLT_TRAINING_MODE}"

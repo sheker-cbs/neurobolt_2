@@ -8,19 +8,19 @@
 #      run_neuro.sh exports NEUROBOLT_SUBJECTS; main.py trains that list.
 #
 # Default (new submit): creates one dated campaign folder for the whole wave:
-#   {CHECKPOINT_PATH}/log_baseline/YYYYMMDD-HHMMSS/   (or log_attn/)
+#   {CHECKPOINT_PATH}/log_baseline/YYYY-MM-DD_HH:MM:SS/   (or log_attn/)
 #   ├── campaign_meta.json
 #   └── runs/{ts}_j{JOB}_{mode}_{subject}/…
 # All jobs share NEUROBOLT_CAMPAIGN_DIR so subjects land in the same campaign.
 #
-# Slurm stdout/stderr: a new directory every submit (including resume).
+# Slurm stdout/stderr: one new directory per submit (including resume).
 # Slurm has no date token, and #SBATCH is fixed before bash runs, so this
-# script mkdir's the dirs and passes --output/--error (overrides run_neuro.sh):
-#   logs_baseline/YYYYMMDD-HHMMSS/output_logs/%x_%j.out
-#   logs_baseline/YYYYMMDD-HHMMSS/error_logs/%x_%j.err
-#   (attention → logs_attn/…). %x is the job name, %j is the Slurm job id.
-# Fresh submits use the same stamp as the campaign folder. Resume uses a
-# new stamp; campaign.txt in that log dir records the checkpoint campaign.
+# script mkdir's the dir and passes --output/--error (overrides run_neuro.sh):
+#   logs/baseline/YYYY-MM-DD_HH:MM:SS/b001_<jobid>.out
+#   logs/baseline/YYYY-MM-DD_HH:MM:SS/b001_<jobid>.err
+#   (attention → logs/attn/…). b001 is batch_001; <jobid> is Slurm %j.
+# squeue job name is b001. Fresh submits use the campaign stamp.
+# Resume uses a new stamp; campaign.txt in that dir records the campaign.
 #
 # Resume incomplete (no new campaign): only resubmit subjects that lack
 # checkpoint-epoch*.pth under that campaign. Retries create a new per-subject
@@ -42,18 +42,18 @@
 #
 # Resume incomplete into existing campaign (latest for mode, or explicit):
 #   bash submit_sub.sh --resume-incomplete
-#   bash submit_sub.sh --resume-incomplete --campaign /path/to/…/20260820-113000
+#   bash submit_sub.sh --resume-incomplete --campaign /path/to/…/2026-08-20_11:30:00
 #
-# Attention mode (logs go to logs_attn/<stamp>/, checkpoints to log_attn/):
+# Attention mode (logs go to logs/attn/<stamp>/, checkpoints to log_attn/):
 #   NEUROBOLT_TRAINING_MODE=attention bash submit_sub.sh
 #
-# Manual single batch (set campaign yourself; mkdir before sbatch):
-#   STAMP=20260820-113000
-#   mkdir -p logs_baseline/$STAMP/output_logs logs_baseline/$STAMP/error_logs
+# Manual single batch (mkdir before sbatch):
+#   STAMP=2026-08-20_11:30:00
+#   mkdir -p logs/baseline/$STAMP
 #   export NEUROBOLT_CAMPAIGN_DIR=…/log_baseline/$STAMP
-#   sbatch --job-name=neurobolt_batch_001 \
-#     --output=logs_baseline/$STAMP/output_logs/%x_%j.out \
-#     --error=logs_baseline/$STAMP/error_logs/%x_%j.err \
+#   sbatch --job-name=b001 \
+#     --output=logs/baseline/$STAMP/b001_%j.out \
+#     --error=logs/baseline/$STAMP/b001_%j.err \
 #     run_neuro.sh subject_batches/batch_001.txt
 #
 set -euo pipefail
@@ -143,16 +143,31 @@ MODE_ROOT="${CHECKPOINT_PATH}/${LOG_FOLDER}"
 # ---------------------------------------------------------------------------
 find_latest_campaign() {
   local mode_root="$1"
-  local latest=""
-  local d
-  # Dated dirs: YYYYMMDD-HHMMSS
+  local d name key best_key="" best=""
+  # New: YYYY-MM-DD_HH:MM:SS. Also accept older YYYYMMDD-HHMMSS dirs.
   while IFS= read -r d; do
-    [ -d "$d" ] && latest="$d"
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    if [[ "$name" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})_([0-9]{2}):([0-9]{2}):([0-9]{2})$ ]]; then
+      key="${BASH_REMATCH[1]}${BASH_REMATCH[2]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}${BASH_REMATCH[5]}${BASH_REMATCH[6]}"
+    elif [[ "$name" =~ ^([0-9]{8})-([0-9]{6})$ ]]; then
+      key="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    else
+      continue
+    fi
+    if [[ -z "$best_key" || "$key" > "$best_key" ]]; then
+      best_key="$key"
+      best="$d"
+    fi
   done < <(
-    ls -1d "$mode_root"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] \
-      2>/dev/null | sort
+    {
+      ls -1d "$mode_root"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9]:[0-9][0-9]:[0-9][0-9] \
+        2>/dev/null || true
+      ls -1d "$mode_root"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9] \
+        2>/dev/null || true
+    }
   )
-  echo "$latest"
+  echo "$best"
 }
 
 subject_is_complete() {
@@ -311,14 +326,14 @@ if (( RESUME_INCOMPLETE )); then
   else
     CAMPAIGN_DIR="$(find_latest_campaign "$MODE_ROOT")"
     if [[ -z "$CAMPAIGN_DIR" ]]; then
-      echo "ERROR: no campaign dirs under ${MODE_ROOT}/ (expected YYYYMMDD-HHMMSS)." >&2
+      echo "ERROR: no campaign dirs under ${MODE_ROOT}/ (expected YYYY-MM-DD_HH:MM:SS)." >&2
       echo "       Pass --campaign PATH or run a fresh submit first." >&2
       exit 1
     fi
   fi
   echo "Campaign dir: ${CAMPAIGN_DIR}  (resume-incomplete; no new campaign)"
   # New log dir: the campaign folder is reused, this submit is a new job wave.
-  LOG_TS="$(date +%Y%m%d-%H%M%S)"
+  LOG_TS="$(date +%Y-%m-%d_%H:%M:%S)"
   SKIP_COMPLETED_EXPORT=1
 
   # Subject universe: explicit args, else all ids currently in batch files.
@@ -360,7 +375,7 @@ if (( RESUME_INCOMPLETE )); then
     write_campaign_meta "$CAMPAIGN_DIR" "$subjects_csv" "resume-incomplete"
   fi
 else
-  CAMPAIGN_TS="$(date +%Y%m%d-%H%M%S)"
+  CAMPAIGN_TS="$(date +%Y-%m-%d_%H:%M:%S)"
   CAMPAIGN_DIR="${MODE_ROOT}/${CAMPAIGN_TS}"
   # Same stamp as the campaign so logs and checkpoints sort together.
   LOG_TS="$CAMPAIGN_TS"
@@ -390,17 +405,15 @@ n_jobs=${#BATCH_FILES[@]}
 echo
 echo "Mode:        ${MODE}  (${LOG_FOLDER})"
 if [ "$MODE" = "attention" ]; then
-  SLURM_LOG_ROOT="logs_attn"
+  SLURM_LOG_ROOT="logs/attn"
 else
-  SLURM_LOG_ROOT="logs_baseline"
+  SLURM_LOG_ROOT="logs/baseline"
 fi
 SLURM_LOG_DIR="${SLURM_LOG_ROOT}/${LOG_TS}"
-SLURM_OUT_DIR="${SLURM_LOG_DIR}/output_logs"
-SLURM_ERR_DIR="${SLURM_LOG_DIR}/error_logs"
 
 echo "Campaign:    ${CAMPAIGN_DIR}"
-echo "Slurm logs:  ${SLURM_OUT_DIR}/"
-echo "             ${SLURM_ERR_DIR}/"
+echo "Slurm logs:  ${SLURM_LOG_DIR}/bNNN_<jobid>.out"
+echo "             ${SLURM_LOG_DIR}/bNNN_<jobid>.err"
 echo "Batches:     ${n_jobs}  (subjects/job target=${SUBJECTS_PER_JOB})"
 echo "Walltime:    ~$(( SUBJECTS_PER_JOB * 30 )) min/job budget (assume ~30 min/subject; short=180 min)"
 if (( SKIP_COMPLETED_EXPORT )); then
@@ -409,7 +422,7 @@ fi
 echo
 
 if (( ! DRY_RUN )); then
-  mkdir -p "$SLURM_OUT_DIR" "$SLURM_ERR_DIR"
+  mkdir -p "$SLURM_LOG_DIR"
   {
     echo "campaign=${CAMPAIGN_DIR}"
     echo "training_mode=${MODE}"
@@ -424,6 +437,7 @@ job_idx=0
 for batchfile in "${BATCH_FILES[@]}"; do
   job_idx=$((job_idx + 1))
   batch_base="$(basename "$batchfile" .txt)"   # e.g. batch_001
+  batch_tag="b${batch_base#batch_}"            # b001; fits squeue's name column
   # Prefer path relative to code root so the job finds it after cd.
   if [[ "$batchfile" == "$SCRIPT_DIR"/* ]]; then
     rel_batch="${batchfile#"$SCRIPT_DIR"/}"
@@ -440,9 +454,9 @@ for batchfile in "${BATCH_FILES[@]}"; do
     if (( SKIP_COMPLETED_EXPORT )); then
       echo "            NEUROBOLT_SKIP_COMPLETED=1 \\"
     fi
-    echo "            sbatch --job-name=neurobolt_${batch_base} \\"
-    echo "              --output=${SLURM_OUT_DIR}/%x_%j.out \\"
-    echo "              --error=${SLURM_ERR_DIR}/%x_%j.err \\"
+    echo "            sbatch --job-name=${batch_tag} \\"
+    echo "              --output=${SLURM_LOG_DIR}/${batch_tag}_%j.out \\"
+    echo "              --error=${SLURM_LOG_DIR}/${batch_tag}_%j.err \\"
     echo "              --export=ALL run_neuro.sh ${rel_batch}"
   else
     export NEUROBOLT_CAMPAIGN_DIR="$CAMPAIGN_DIR"
@@ -453,9 +467,9 @@ for batchfile in "${BATCH_FILES[@]}"; do
       unset NEUROBOLT_SKIP_COMPLETED || true
     fi
     sbatch \
-      --job-name="neurobolt_${batch_base}" \
-      --output="${SLURM_OUT_DIR}/%x_%j.out" \
-      --error="${SLURM_ERR_DIR}/%x_%j.err" \
+      --job-name="${batch_tag}" \
+      --output="${SLURM_LOG_DIR}/${batch_tag}_%j.out" \
+      --error="${SLURM_LOG_DIR}/${batch_tag}_%j.err" \
       --export=ALL \
       "$SCRIPT_DIR/run_neuro.sh" \
       "$rel_batch"

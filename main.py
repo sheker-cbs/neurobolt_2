@@ -99,7 +99,7 @@ args.log_folder = LOG_FOLDER
 args.finetune = labram_ckpt_path
 args.dataset_root = ALGERMISSEN_DATA_ROOT
 # Overwritten per subject/job by prepare_run_dirs() to
-#   {checkpoint_path}/{log_baseline|log_attn}/runs/{timestamp}_j{JOB}[_a{ARRAY}]_{mode}_{subject}/
+#   {checkpoint_path}/{log_baseline|log_attn}/runs/{YYYY-MM-DD_HH:MM:SS}_j{JOB}[_a{ARRAY}]_{mode}_{subject}/
 #   and .../tb/ for TensorBoard.
 args.output_dir = mode_checkpoint_root
 args.log_dir = str(Path(mode_checkpoint_root) / 'tb')
@@ -223,13 +223,13 @@ def prepare_run_dirs(args, subject, checkpoint_root):
 
     Layout (mode = baseline → log_baseline, attention → log_attn):
       {checkpoint_path}/{log_baseline|log_attn}/runs/
-          {YYYYMMDD-HHMMSS}_j{JOB}_a{ARRAY}_{mode}_{subject}/
+          {YYYY-MM-DD_HH:MM:SS}_j{JOB}_a{ARRAY}_{mode}_{subject}/
         log.txt, run_meta.json, predictions_vs_true_epoch*.png, tb/,
         {dataname}-VS_smooth_16s-.../   (from runtime.save_model)
     Off SLURM, JOB is `local` and `_a{ARRAY}` is omitted.
     `checkpoint_root` is the mode folder, or NEUROBOLT_CAMPAIGN_DIR when set.
     """
-    ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    ts = datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
     job_id = os.environ.get('SLURM_JOB_ID', 'local')
     array_id = os.environ.get('SLURM_ARRAY_TASK_ID', '').strip()
     mode = getattr(args, 'training_mode', 'baseline')
@@ -629,7 +629,7 @@ def _env_flag(name):
 
 if __name__ == '__main__':
     # submit_sub.sh sets NEUROBOLT_CAMPAIGN_DIR to
-    # {checkpoints}/{log_baseline|log_attn}/{YYYYMMDD-HHMMSS}.
+    # {checkpoints}/{log_baseline|log_attn}/{YYYY-MM-DD_HH:MM:SS}.
     # Without it, runs land directly under the mode folder.
     campaign = os.environ.get('NEUROBOLT_CAMPAIGN_DIR', '').strip()
     checkpoint_root = campaign or mode_checkpoint_root
