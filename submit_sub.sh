@@ -13,6 +13,15 @@
 #   └── runs/{ts}_j{JOB}_{mode}_{subject}/…
 # All jobs share NEUROBOLT_CAMPAIGN_DIR so subjects land in the same campaign.
 #
+# Slurm stdout/stderr: a new directory every submit (including resume).
+# Slurm has no date token, and #SBATCH is fixed before bash runs, so this
+# script mkdir's the dirs and passes --output/--error (overrides run_neuro.sh):
+#   logs_baseline/YYYYMMDD-HHMMSS/output_logs/%x_%j.out
+#   logs_baseline/YYYYMMDD-HHMMSS/error_logs/%x_%j.err
+#   (attention → logs_attn/…). %x is the job name, %j is the Slurm job id.
+# Fresh submits use the same stamp as the campaign folder. Resume uses a
+# new stamp; campaign.txt in that log dir records the checkpoint campaign.
+#
 # Resume incomplete (no new campaign): only resubmit subjects that lack
 # checkpoint-epoch*.pth under that campaign. Retries create a new per-subject
 # run folder inside the same campaign (campaign folder is not recreated).
@@ -35,12 +44,17 @@
 #   bash submit_sub.sh --resume-incomplete
 #   bash submit_sub.sh --resume-incomplete --campaign /path/to/…/20260820-113000
 #
-# Attention mode (also switch #SBATCH log paths in run_neuro.sh to logs_attn/):
+# Attention mode (logs go to logs_attn/<stamp>/, checkpoints to log_attn/):
 #   NEUROBOLT_TRAINING_MODE=attention bash submit_sub.sh
 #
-# Manual single batch (set campaign yourself):
-#   export NEUROBOLT_CAMPAIGN_DIR=…/log_baseline/20260820-113000
-#   sbatch --job-name=neurobolt_batch_001 run_neuro.sh subject_batches/batch_001.txt
+# Manual single batch (set campaign yourself; mkdir before sbatch):
+#   STAMP=20260820-113000
+#   mkdir -p logs_baseline/$STAMP/output_logs logs_baseline/$STAMP/error_logs
+#   export NEUROBOLT_CAMPAIGN_DIR=…/log_baseline/$STAMP
+#   sbatch --job-name=neurobolt_batch_001 \
+#     --output=logs_baseline/$STAMP/output_logs/%x_%j.out \
+#     --error=logs_baseline/$STAMP/error_logs/%x_%j.err \
+#     run_neuro.sh subject_batches/batch_001.txt
 #
 set -euo pipefail
 
@@ -59,7 +73,7 @@ EXPLICIT_SUBJECTS=()
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-/data/p_03183/personal_workspaces/sheker/NeuroBOLT/checkpoints}"
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -303,6 +317,8 @@ if (( RESUME_INCOMPLETE )); then
     fi
   fi
   echo "Campaign dir: ${CAMPAIGN_DIR}  (resume-incomplete; no new campaign)"
+  # New log dir: the campaign folder is reused, this submit is a new job wave.
+  LOG_TS="$(date +%Y%m%d-%H%M%S)"
   SKIP_COMPLETED_EXPORT=1
 
   # Subject universe: explicit args, else all ids currently in batch files.
@@ -346,6 +362,8 @@ if (( RESUME_INCOMPLETE )); then
 else
   CAMPAIGN_TS="$(date +%Y%m%d-%H%M%S)"
   CAMPAIGN_DIR="${MODE_ROOT}/${CAMPAIGN_TS}"
+  # Same stamp as the campaign so logs and checkpoints sort together.
+  LOG_TS="$CAMPAIGN_TS"
   echo "Campaign dir: ${CAMPAIGN_DIR}  (new submit)"
   if (( ! DRY_RUN )); then
     mkdir -p "${CAMPAIGN_DIR}/runs"
@@ -371,7 +389,18 @@ n_jobs=${#BATCH_FILES[@]}
 
 echo
 echo "Mode:        ${MODE}  (${LOG_FOLDER})"
+if [ "$MODE" = "attention" ]; then
+  SLURM_LOG_ROOT="logs_attn"
+else
+  SLURM_LOG_ROOT="logs_baseline"
+fi
+SLURM_LOG_DIR="${SLURM_LOG_ROOT}/${LOG_TS}"
+SLURM_OUT_DIR="${SLURM_LOG_DIR}/output_logs"
+SLURM_ERR_DIR="${SLURM_LOG_DIR}/error_logs"
+
 echo "Campaign:    ${CAMPAIGN_DIR}"
+echo "Slurm logs:  ${SLURM_OUT_DIR}/"
+echo "             ${SLURM_ERR_DIR}/"
 echo "Batches:     ${n_jobs}  (subjects/job target=${SUBJECTS_PER_JOB})"
 echo "Walltime:    ~$(( SUBJECTS_PER_JOB * 30 )) min/job budget (assume ~30 min/subject; short=180 min)"
 if (( SKIP_COMPLETED_EXPORT )); then
@@ -379,9 +408,13 @@ if (( SKIP_COMPLETED_EXPORT )); then
 fi
 echo
 
-mkdir -p logs_baseline/output_logs logs_baseline/error_logs
-if [ "$MODE" = "attention" ]; then
-  mkdir -p logs_attn/output_logs logs_attn/error_logs
+if (( ! DRY_RUN )); then
+  mkdir -p "$SLURM_OUT_DIR" "$SLURM_ERR_DIR"
+  {
+    echo "campaign=${CAMPAIGN_DIR}"
+    echo "training_mode=${MODE}"
+    echo "submitted_at=${LOG_TS}"
+  } > "${SLURM_LOG_DIR}/campaign.txt"
 fi
 
 # Pass batch path as $1 to run_neuro.sh (SLURM forwards args after the script).
@@ -407,7 +440,10 @@ for batchfile in "${BATCH_FILES[@]}"; do
     if (( SKIP_COMPLETED_EXPORT )); then
       echo "            NEUROBOLT_SKIP_COMPLETED=1 \\"
     fi
-    echo "            sbatch --job-name=neurobolt_${batch_base} --export=ALL run_neuro.sh ${rel_batch}"
+    echo "            sbatch --job-name=neurobolt_${batch_base} \\"
+    echo "              --output=${SLURM_OUT_DIR}/%x_%j.out \\"
+    echo "              --error=${SLURM_ERR_DIR}/%x_%j.err \\"
+    echo "              --export=ALL run_neuro.sh ${rel_batch}"
   else
     export NEUROBOLT_CAMPAIGN_DIR="$CAMPAIGN_DIR"
     export NEUROBOLT_TRAINING_MODE="$MODE"
@@ -418,6 +454,8 @@ for batchfile in "${BATCH_FILES[@]}"; do
     fi
     sbatch \
       --job-name="neurobolt_${batch_base}" \
+      --output="${SLURM_OUT_DIR}/%x_%j.out" \
+      --error="${SLURM_ERR_DIR}/%x_%j.err" \
       --export=ALL \
       "$SCRIPT_DIR/run_neuro.sh" \
       "$rel_batch"
