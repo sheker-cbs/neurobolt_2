@@ -5,6 +5,10 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=3:00:00
+# Fallback only. submit_sub.sh overrides these with a new directory per submit:
+#   logs_baseline/YYYYMMDD-HHMMSS/output_logs/%x_%j.out
+#   logs_baseline/YYYYMMDD-HHMMSS/error_logs/%x_%j.err
+# Slurm reads #SBATCH before bash runs, so $(date ...) here is not a timestamp.
 #SBATCH --output=logs_baseline/output_logs/neurobolt_%j.out
 #SBATCH --error=logs_baseline/error_logs/neurobolt_%j.err
 #
@@ -16,8 +20,10 @@
 # Prerequisites:
 #   - conda env `neurobolt` available after `source ~/.bashrc`
 #   - sbatch FROM this code root (relative #SBATCH log paths)
-#   - mkdir -p logs_baseline/output_logs logs_baseline/error_logs
-#     (script also creates these; attention mode uses logs_attn/)
+#   - dated logs: submit_sub.sh mkdir's
+#       logs_baseline/YYYYMMDD-HHMMSS/{output_logs,error_logs}
+#     (attention: logs_attn/) and passes --output/--error.
+#     Hand sbatch without those flags falls back to logs_baseline/output_logs/.
 #   - bash submit_sub.sh writes subject_batches/batch_NNN.txt and submits
 #
 # Usage (preferred — job name set on the CLI; #SBATCH --job-name does not
@@ -39,13 +45,16 @@
 # check `sinfo -o '%P %G'` and switch to the name this partition advertises
 # (for example gpu:turing:1).
 #
-# Training mode (MUST match the #SBATCH log paths above; Slurm fixes those
-# paths at submit time, so this script cannot switch them later):
-#   baseline  → logs_baseline/ + checkpoints/…/log_baseline/
-#   attention → logs_attn/     + checkpoints/…/log_attn/
-# For attention, change the two #SBATCH --output/--error lines above to
-#   logs_attn/output_logs/... and logs_attn/error_logs/...
-# then: NEUROBOLT_TRAINING_MODE=attention sbatch run_neuro.sh …
+# Training mode (Slurm fixes --output/--error at submit time):
+#   baseline  → logs_baseline/YYYYMMDD-HHMMSS/ + checkpoints/…/log_baseline/
+#   attention → logs_attn/YYYYMMDD-HHMMSS/     + checkpoints/…/log_attn/
+# submit_sub.sh passes the dated paths. For a hand submit:
+#   STAMP=$(date +%Y%m%d-%H%M%S)
+#   mkdir -p logs_attn/$STAMP/output_logs logs_attn/$STAMP/error_logs
+#   NEUROBOLT_TRAINING_MODE=attention sbatch \
+#     --output=logs_attn/$STAMP/output_logs/%x_%j.out \
+#     --error=logs_attn/$STAMP/error_logs/%x_%j.err \
+#     run_neuro.sh …
 #
 # Checkpoints / TB:
 #   checkpoints/log_baseline/runs/{ts}_j{JOB}_baseline_{subject}/
